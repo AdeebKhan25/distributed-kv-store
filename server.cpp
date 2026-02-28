@@ -3,6 +3,7 @@
 #include <netinet/in.h> 
 #include <unistd.h>   
 #include <cstring>
+#include <climits>
 #include <cerrno>
 #include <sstream>
 #include <unordered_map>
@@ -10,11 +11,32 @@
 // define constants
 #define BUFFER_SIZE 1024
 
-// define storage
-std::unordered_map<std::string, std::string> store;
+// client structure
+struct Client {
+    int fd;
+    std::string input_buffer;
+    std::string output_buffer;
+
+    Client() {
+        fd = INT_MIN;
+        input_buffer = "";
+        output_buffer = "";
+    }
+
+    Client(int client_fd) {
+        fd = client_fd;
+        input_buffer = "";
+        output_buffer = "";
+    }
+};
+
+// clients storage
+std::unordered_map<int, Client> clients;
 
 // command processing
-std::string process_command(const std::string& command) {
+std::string process_command(
+    const std::string& command, 
+    std::unordered_map<std::string, std::string>& store) {
     // create a stream
     std::istringstream iss(command);
     std::string cmd;
@@ -55,7 +77,49 @@ std::string process_command(const std::string& command) {
     return "UNKNOWN\n";
 }
 
+// read handler
+bool handle_read(
+    Client& client,
+    std::unordered_map<std::string, std::string>& store) {
+        // reading logic
+        char buffer[BUFFER_SIZE];
+        int bytes = recv(client.fd, buffer, BUFFER_SIZE - 1, 0);
+        if (bytes > 0) {
+            std::cout << "SUCCESS: RECEIVED DATA => " << std::string(buffer, bytes) << std::endl; 
+            client.input_buffer.append(buffer, bytes);
+        } else if(bytes == 0) {
+            std::cout << "STATUS: CLIENT DISCONNECTED" << std::endl; 
+            return false;
+        } else {
+            std::cerr << "ERROR: RECEIVE FAILED" << std::endl;
+            return false;
+        }
+        // process input
+        size_t pos;
+        while((pos = client.input_buffer.find('\n')) != std::string::npos) {
+            std::string command = client.input_buffer.substr(0, pos);
+            client.input_buffer.erase(0, pos + 1);
+            std::string output = process_command(command, store);
+            // save output in output buffer
+            client.output_buffer.append(output);
+        } 
+        return true;       
+}
+
+// write handler
+bool handle_write(Client& client) {
+    if(send(client.fd, client.output_buffer.data(), client.output_buffer.size(), 0) == -1) {
+        std::cerr << "ERROR: SEND FAILED" << std::endl;
+        return false;
+    } 
+    client.output_buffer.clear();
+    return true;
+}
+
 int main() {
+    // define main storage
+    std::unordered_map<std::string, std::string> store;
+
     // create the socket
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if(serverSocket == -1) {
@@ -90,37 +154,20 @@ int main() {
             std::cerr << "ERROR: ACCEPT FAILED" << std::endl;
             continue;
         }
+        clients.emplace(clientSocket, Client(clientSocket));
+        Client& client = clients[clientSocket];
         std::cout << "SUCCESS: CLIENT CONNECTED WITH FD: " << clientSocket << std::endl;
 
-        // parsing logic
-        std::string accumulator;
-        char buffer[BUFFER_SIZE];
+        // networking logic
         while(true) {
-            int bytes = recv(clientSocket, buffer, BUFFER_SIZE - 1, 0);
-            if (bytes > 0) {
-                std::cout << "SUCCESS: RECEIVED DATA => " << std::string(buffer, bytes) << std::endl; 
-                accumulator.append(buffer, bytes);
-            } else if(bytes == 0) {
-                std::cout << "STATUS: CLIENT DISCONNECTED" << std::endl; 
+            if(!handle_read(client, store))
                 break;
-            } else {
-                std::cerr << "ERROR: RECEIVE FAILED" << std::endl;
+            if(!handle_write(client)) 
                 break;
-            }
-            // processing of data
-            size_t pos;
-            while((pos = accumulator.find('\n')) != std::string::npos) {
-                std::string command = accumulator.substr(0, pos);
-                accumulator.erase(0, pos + 1);
-                std::string output = process_command(command);
-                if(send(clientSocket, output.c_str(), output.length(), 0) == -1) {
-                    std::cerr << "ERROR: SEND FAILED" << std::endl;
-                    break;
-                }
-            }
         }
 
         close(clientSocket);
+        clients.erase(clientSocket);
     }
 
     // close the socket
